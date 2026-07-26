@@ -1,0 +1,8 @@
+{
+  "versions": [
+    { "from": "2025-01-01", "to": "2026-01-01",
+      "rates": { "Senior Social Worker": 6000, "Social Worker": 4650, "Programme Assistant": 2800 } },
+    { "from": "2026-01-01", "to": null,
+      "rates": { "Senior Social Worker": 6200, "Social Worker": 4800, "Programme Assistant": 2900 } }
+  ]
+}

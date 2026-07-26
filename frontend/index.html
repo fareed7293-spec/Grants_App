@@ -1,0 +1,212 @@
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>Grant Uploads</title></head>
+<body>
+<div id="root"></div>
+<script type="module">
+import React from "https://esm.sh/react@18";
+import { createRoot } from "https://esm.sh/react-dom@18/client";
+
+const API = window.location.origin.replace("5173", "3000");
+const TOKEN = "dev-token"; // matches API_TOKEN in docker-compose — see README
+
+const { useState, useEffect, useCallback } = React;
+const h = React.createElement;
+
+async function api(path, opts = {}) {
+  const res = await fetch(API + path, { ...opts, headers: { Authorization: `Bearer ${TOKEN}`, ...opts.headers } });
+  if (!res.ok) throw new Error((await res.json()).error || res.status);
+  return res.json();
+}
+
+const money = (n) => (n == null ? "" : `$${n}`);
+
+// Labeled field — plain <input placeholder> alone made it too easy to miss
+// which column was which; this makes every field explicit.
+function Field({ label, children }) {
+  return h("label", { style: { display: "inline-block", marginRight: 12, marginBottom: 10, fontSize: 13 } },
+    h("div", { style: { color: "#555", marginBottom: 2 } }, label),
+    children);
+}
+
+// Shared table for the current batch, and for search results.
+function ResultsTable({ rows }) {
+  if (!rows.length) return null;
+  return h("table", { width: "100%", cellPadding: 6, style: { borderCollapse: "collapse", marginTop: 12 } },
+    h("thead", null, h("tr", { style: { borderBottom: "2px solid #333", textAlign: "left" } },
+      h("th", null, "Centre ID"), h("th", null, "Centre Name"), h("th", null, "Effective period"), h("th", null, "Status"),
+      h("th", null, "Sanctioned Grant"), h("th", null, "Ministry"), h("th", null, "Community Chest"),
+      h("th", null, "Town Council Social Support"), h("th", null, "Notes"))),
+    h("tbody", null, rows.map((r, i) =>
+      h("tr", { key: r.uploadId ? `${r.uploadId}-${r.rowNumber}` : r.rowNumber ?? i, style: { borderBottom: "1px solid #eee" } },
+        h("td", null, r.centreId || "—"),
+        h("td", null, r.centreName || "—"),
+        h("td", null, r.effectivePeriod || "—"),
+        h("td", { style: { color: r.status === "Grant Rejected" || r.status === "Failed" ? "crimson" : r.status === "Grant Accepted" ? "green" : "#555" } }, r.status),
+        h("td", null, money(r.sanctionedGrant)),
+        h("td", null, money(r.ministry)),
+        h("td", null, money(r.communityChest)),
+        h("td", null, money(r.townCouncil)),
+        h("td", null, r.error || "")))));
+}
+
+function UploadSection({ onStarted }) {
+  const [file, setFile] = useState(null);
+  const [error, setError] = useState(null);
+
+  async function submit(e) {
+    e.preventDefault();
+    setError(null);
+    try {
+      const fd = new FormData();
+      fd.append("file", file);
+      const { uploadId } = await api("/uploads", { method: "POST", body: fd });
+      onStarted(uploadId);
+    } catch (err) { setError(err.message); }
+  }
+
+  return h("section", null,
+    h("h3", null, "1. Upload a batch (.xlsx)"),
+    h("p", { style: { fontSize: 13, color: "#666", marginTop: -6 } },
+      "Columns: Centre Name, Centre ID, Centre type, Case load, Senior. Social Worker, Social Worker, Programme  Assistant, Co-funding, License status, Effective period"),
+    h("form", { onSubmit: submit },
+      h("input", { type: "file", accept: ".xlsx,.xls", onChange: (e) => setFile(e.target.files[0]) }),
+      h("button", { disabled: !file, style: { marginLeft: 8 } }, "Upload")),
+    error && h("p", { style: { color: "crimson" } }, `Error: ${error}`));
+}
+
+const EMPTY_CENTRE = {
+  centreName: "", centreId: "", centreType: "standard", caseload: "",
+  licenseStatus: "Active", effectivePeriod: "",
+  seniorSocialWorkers: "0", socialWorkers: "0", programmeAssistants: "0", coFunding: "0",
+};
+
+function SingleEntrySection({ onStarted }) {
+  const [form, setForm] = useState(EMPTY_CENTRE);
+  const [error, setError] = useState(null);
+  const set = (k) => (e) => setForm({ ...form, [k]: e.target.value });
+
+  async function submit(e) {
+    e.preventDefault();
+    setError(null);
+    try {
+      const { uploadId } = await api("/centres", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          ...form, caseload: Number(form.caseload),
+          seniorSocialWorkers: Number(form.seniorSocialWorkers),
+          socialWorkers: Number(form.socialWorkers),
+          programmeAssistants: Number(form.programmeAssistants),
+          coFunding: Number(form.coFunding),
+        }),
+      });
+      onStarted(uploadId);
+      setForm(EMPTY_CENTRE);
+    } catch (err) { setError(err.message); }
+  }
+
+  const w = { width: 130 };
+  return h("section", { style: { marginTop: 28 } },
+    h("h3", null, "2. Add a single centre"),
+    h("p", { style: { fontSize: 13, color: "#666", marginTop: -6 } },
+      "Same centre + effective period as an existing entry updates it instead of creating a duplicate."),
+    h("form", { onSubmit: submit },
+      h(Field, { label: "Centre Name" }, h("input", { style: w, value: form.centreName, onChange: set("centreName") })),
+      h(Field, { label: "Centre ID *" }, h("input", { style: w, value: form.centreId, onChange: set("centreId"), required: true })),
+      h(Field, { label: "Centre type" },
+        h("select", { style: w, value: form.centreType, onChange: set("centreType") },
+          h("option", { value: "standard" }, "Standard"), h("option", { value: "rural" }, "Rural"))),
+      h(Field, { label: "Case load *" }, h("input", { style: w, type: "number", value: form.caseload, onChange: set("caseload"), required: true })),
+      h(Field, { label: "Effective period *" },
+        h("input", { style: w, placeholder: "2026-Q3", value: form.effectivePeriod, onChange: set("effectivePeriod"), required: true })),
+      h(Field, { label: "License status" },
+        h("select", { style: w, value: form.licenseStatus, onChange: set("licenseStatus") },
+          h("option", { value: "Active" }, "Active"), h("option", { value: "Inactive" }, "Inactive"))),
+      h("br"),
+      h(Field, { label: "Senior Social Worker" }, h("input", { style: w, type: "number", value: form.seniorSocialWorkers, onChange: set("seniorSocialWorkers") })),
+      h(Field, { label: "Social Worker" }, h("input", { style: w, type: "number", value: form.socialWorkers, onChange: set("socialWorkers") })),
+      h(Field, { label: "Programme Assistant" }, h("input", { style: w, type: "number", value: form.programmeAssistants, onChange: set("programmeAssistants") })),
+      h(Field, { label: "Co-funding" }, h("input", { style: w, type: "number", value: form.coFunding, onChange: set("coFunding") })),
+      h("br"),
+      h("button", { style: { marginTop: 4 } }, "Add centre")),
+    error && h("p", { style: { color: "crimson" } }, `Error: ${error}`));
+}
+
+function SearchSection() {
+  const [ids, setIds] = useState("");
+  const [names, setNames] = useState("");
+  const [period, setPeriod] = useState("");
+  const [rows, setRows] = useState([]);
+  const [error, setError] = useState(null);
+  const [searched, setSearched] = useState(false);
+
+  async function search(e) {
+    e.preventDefault();
+    setError(null);
+    try {
+      const params = new URLSearchParams();
+      if (ids.trim()) params.set("ids", ids.trim());
+      if (names.trim()) params.set("names", names.trim());
+      if (period.trim()) params.set("period", period.trim());
+      const result = await api(`/centres?${params.toString()}`);
+      setRows(result);
+      setSearched(true);
+    } catch (err) { setError(err.message); }
+  }
+
+  const canSearch = ids.trim() || names.trim() || period.trim();
+  return h("section", { style: { marginTop: 32 } },
+    h("h3", null, "3. Search"),
+    h("p", { style: { fontSize: 13, color: "#666", marginTop: -6 } },
+      "Match by Centre ID(s) or Centre Name(s), and/or Effective period. Use * on any field to match all."),
+    h("form", { onSubmit: search },
+      h(Field, { label: "Centre ID(s)" },
+        h("input", { style: { width: 220 }, placeholder: "CTR-B or CTR-A, CTR-B or *", value: ids, onChange: (e) => setIds(e.target.value) })),
+      h(Field, { label: "Centre Name(s)" },
+        h("input", { style: { width: 220 }, placeholder: "Woodlands ... or *", value: names, onChange: (e) => setNames(e.target.value) })),
+      h(Field, { label: "Effective period" },
+        h("input", { style: { width: 140 }, placeholder: "2026-Q3 or *", value: period, onChange: (e) => setPeriod(e.target.value) })),
+      h("button", { style: { marginLeft: 8 }, disabled: !canSearch }, "Search")),
+    error && h("p", { style: { color: "crimson" } }, `Error: ${error}`),
+    searched && rows.length === 0 && h("p", null, "No results."),
+    h(ResultsTable, { rows }));
+}
+
+function App() {
+  const [id, setId] = useState(null);
+  const [status, setStatus] = useState(null);
+  const [rows, setRows] = useState([]);
+  const [error, setError] = useState(null);
+
+  const refresh = useCallback(async () => {
+    if (!id) return;
+    try {
+      setStatus(await api(`/uploads/${id}`));
+      setRows(await api(`/uploads/${id}/rows`));
+    } catch (err) { setError(err.message); }
+  }, [id]);
+
+  useEffect(() => {
+    if (!id) return;
+    refresh();
+    const t = setInterval(refresh, 1500);
+    return () => clearInterval(t);
+  }, [id, refresh]);
+
+  return h("div", { style: { fontFamily: "sans-serif", maxWidth: 900, margin: "40px auto" } },
+    h("h2", null, "Grant Computation Orchestrator"),
+    h(UploadSection, { onStarted: setId }),
+    h(SingleEntrySection, { onStarted: setId }),
+    error && h("p", { style: { color: "crimson" } }, `Error: ${error}`),
+    status && h("div", { style: { marginTop: 16 } },
+      h("strong", null, "Current batch: "),
+      `${status.status} (${status.processed_rows || 0}/${status.total_rows || "?"}, ${status.failed_rows || 0} failed)`,
+      h(ResultsTable, { rows })),
+    h(SearchSection));
+}
+
+createRoot(document.getElementById("root")).render(h(App));
+</script>
+</body>
+</html>

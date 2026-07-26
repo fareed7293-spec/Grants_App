@@ -1,0 +1,5 @@
+{
+  "name": "grant-computation",
+  "type": "module",
+  "scripts": { "start": "node run.js", "test": "node --test calculator.test.js" }
+}

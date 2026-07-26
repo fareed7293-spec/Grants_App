@@ -1,0 +1,16 @@
+{
+  "gates": [
+    { "type": "licenceActiveFullQuarter" },
+    { "type": "minQualifiedHeadcount", "role": "Senior Social Worker", "min": 1 },
+    { "type": "minCaseload", "min": 10 }
+  ],
+  "tiersByCentreType": {
+    "standard": [[10, 29, 0.70], [30, 49, 0.85], [50, null, 1.00]],
+    "rural":    [[10, 19, 0.80], [20, 39, 0.90], [40, null, 1.00]]
+  },
+  "split": [
+    { "party": "Ministry", "percent": 0.60 },
+    { "party": "Community Chest", "percent": 0.25 },
+    { "party": "Town Council Social Support", "percent": 0.15 }
+  ]
+}

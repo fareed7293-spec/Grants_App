@@ -1,0 +1,65 @@
+# CI/CD — Task 1B
+# Images tagged with commit SHA, never `latest` — every deploy traces to an
+# exact commit + pipeline run. Staging deploys automatically on merge to
+# main; production is manual, gated to a Protected Environment, and only
+# runs against a git tag.
+#
+# Safeguard I consider essential for a government production system:
+# `migration-check` — dry-runs pending SQL against a prod schema snapshot
+# and fails the pipeline on destructive changes (dropped column/table,
+# NOT NULL without a default) unless a second reviewer has explicitly
+# acked it in the MR. For financial/grant records, a silent destructive
+# migration is a worse failure mode than almost any application bug —
+# it's the one gate aimed specifically at the highest-blast-radius step
+# (the deploy itself), on top of the tests/scans that catch things pre-merge.
+
+stages: [install, test, build, scan, migration-check, deploy-staging, deploy-prod]
+
+install:
+  image: node:20-alpine
+  stage: install
+  script: for s in backend worker grant-computation; do (cd $s && npm ci); done
+
+test:
+  image: node:20-alpine
+  stage: test
+  script:
+    - cd grant-computation && npm test
+    - cd ../backend && npx eslint . --max-warnings=0
+
+build:
+  image: docker:24-cli
+  services: ["docker:24-dind"]
+  stage: build
+  rules: [{ if: '$CI_COMMIT_BRANCH == "main" || $CI_COMMIT_TAG' }]
+  script:
+    - for s in backend worker frontend; do
+        docker build -t $CI_REGISTRY_IMAGE/$s:$CI_COMMIT_SHORT_SHA ./$s;
+        docker push $CI_REGISTRY_IMAGE/$s:$CI_COMMIT_SHORT_SHA;
+      done
+
+scan:
+  image: aquasec/trivy:latest
+  stage: scan
+  rules: [{ if: '$CI_COMMIT_BRANCH == "main" || $CI_COMMIT_TAG' }]
+  script: for s in backend worker frontend; do trivy image --exit-code 1 --severity CRITICAL,HIGH $CI_REGISTRY_IMAGE/$s:$CI_COMMIT_SHORT_SHA; done
+
+migration-check:
+  image: node:20-alpine
+  stage: migration-check
+  rules: [{ if: '$CI_COMMIT_BRANCH == "main" || $CI_COMMIT_TAG', changes: ["db/schema.sql"] }]
+  script: echo "dry-run schema diff against prod snapshot; fail on destructive ops (stub for this exercise)"
+
+deploy-staging:
+  image: bitnami/kubectl:latest
+  stage: deploy-staging
+  rules: [{ if: '$CI_COMMIT_BRANCH == "main"' }]
+  environment: { name: staging, url: https://staging.grants.example.gov.sg }
+  script: kubectl set image deployment/backend backend=$CI_REGISTRY_IMAGE/backend:$CI_COMMIT_SHORT_SHA -n staging
+
+deploy-prod:
+  image: bitnami/kubectl:latest
+  stage: deploy-prod
+  rules: [{ if: '$CI_COMMIT_TAG', when: manual }] # + Protected Environment restricts who can click this
+  environment: { name: production, url: https://grants.example.gov.sg }
+  script: kubectl set image deployment/backend backend=$CI_REGISTRY_IMAGE/backend:$CI_COMMIT_TAG -n production
