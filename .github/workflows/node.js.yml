@@ -1,0 +1,239 @@
+name: Enterprise DevSecOps CI Pipeline
+
+on:
+  push:
+    branches: [ "main" ]
+    tags: [ "v*.*.*" ]
+  pull_request:
+    branches: [ "main" ]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  security-events: write # Allows publishing Trivy SARIF reports to GitHub Security
+
+env:
+  DOCKER_IMAGE_NAME: ${{ secrets.DOCKERHUB_USERNAME }}/enterprise-app
+  NEXUS_REGISTRY_URL: ${{ secrets.NEXUS_REGISTRY_URL }} # e.g., https://nexus.yourdomain.com/repository/npm-hosted/
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # STAGE 1: Code Linting
+  # ---------------------------------------------------------------------------
+  lint:
+    name: Lint & Code Style
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.x
+          cache: 'npm'
+
+      - name: Install Dependencies
+        run: npm ci
+
+      - name: Run Linter
+        run: npm run lint --if-present
+
+  # ---------------------------------------------------------------------------
+  # STAGE 2: Test Matrix & Code Coverage
+  # ---------------------------------------------------------------------------
+  test:
+    name: Test on Node.js ${{ matrix.node-version }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: [18.x, 20.x, 22.x]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: 'npm'
+
+      - name: Install Dependencies
+        run: npm ci
+
+      - name: Run Test Suite & Generate Coverage
+        run: npm test -- --coverage --ci --maxWorkers=2
+
+      - name: Upload Coverage for SonarQube
+        if: matrix.node-version == '22.x'
+        uses: actions/upload-artifact@v4
+        with:
+          name: code-coverage
+          path: coverage/
+          retention-days: 1
+
+  # ---------------------------------------------------------------------------
+  # STAGE 3: SonarQube SAST & Quality Gate
+  # ---------------------------------------------------------------------------
+  sonarqube:
+    name: SonarQube Code Analysis & Quality Gate
+    needs: [lint, test]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # Full git history required for blame and git diff analysis
+
+      - name: Download Test Coverage
+        uses: actions/download-artifact@v4
+        with:
+          name: code-coverage
+          path: coverage/
+
+      - name: Execute SonarQube Scan
+        uses: sonarsource/sonarqube-scan-action@v5
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+        with:
+          args: >
+            -Dsonar.projectKey=enterprise-app
+            -Dsonar.sources=src
+            -Dsonar.tests=tests
+            -Dsonar.javascript.lcov.reportPaths=coverage/lcov.info
+
+      - name: SonarQube Quality Gate Check
+        uses: sonarsource/sonarqube-quality-gate-action@v1
+        timeout-minutes: 5
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+
+  # ---------------------------------------------------------------------------
+  # STAGE 4: Build & Publish to Sonatype Nexus
+  # ---------------------------------------------------------------------------
+  build-and-publish-nexus:
+    name: Package & Publish to Nexus
+    needs: [sonarqube]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.x
+          cache: 'npm'
+          registry-url: ${{ env.NEXUS_REGISTRY_URL }}
+
+      - name: Install Dependencies
+        run: npm ci
+
+      - name: Compile Application Bundle
+        run: npm run build
+
+      - name: Upload Production Dist Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-dist-${{ github.sha }}
+          path: dist/
+          retention-days: 7
+
+      - name: Publish Artifact to Nexus
+        if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NEXUS_AUTH_TOKEN }}
+        run: |
+          npm pack
+          npm publish --registry=${{ env.NEXUS_REGISTRY_URL }}
+
+  # ---------------------------------------------------------------------------
+  # STAGE 5: Trivy Container Vulnerability Scan
+  # ---------------------------------------------------------------------------
+  security-scan:
+    name: Trivy Container Vulnerability Scan
+    needs: [build-and-publish-nexus]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download Build Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: app-dist-${{ github.sha }}
+          path: dist/
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Local Staging Image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          load: true
+          tags: ${{ env.DOCKER_IMAGE_NAME }}:staging-scan
+
+      - name: Scan Image for Vulnerabilities
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: '${{ env.DOCKER_IMAGE_NAME }}:staging-scan'
+          format: 'table'
+          exit-code: '1' # Fails the pipeline if CRITICAL/HIGH vulnerabilities exist
+          ignore-unfixed: true
+          vuln-type: 'os,library'
+          severity: 'CRITICAL,HIGH'
+
+  # ---------------------------------------------------------------------------
+  # STAGE 6: Build & Push Multi-Arch Image to Docker Hub
+  # ---------------------------------------------------------------------------
+  publish-dockerhub:
+    name: Push Production Container to Docker Hub
+    needs: [security-scan]
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download Build Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: app-dist-${{ github.sha }}
+          path: dist/
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Extract Docker Metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.DOCKER_IMAGE_NAME }}
+          tags: |
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+            type=sha,format=short,prefix=sha-
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+
+      - name: Authenticate to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and Push Multi-Arch Image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          platforms: linux/amd64,linux/arm64
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
